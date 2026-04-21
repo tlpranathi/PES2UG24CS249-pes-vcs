@@ -14,7 +14,7 @@
 //
 // PROVIDED functions: index_find, index_remove, index_status
 // TODO functions:     index_load, index_save, index_add
-
+#include <errno.h>
 #include "index.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,6 +23,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <dirent.h>
+int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out);
 
 // ─── PROVIDED ────────────────────────────────────────────────────────────────
 
@@ -137,8 +138,25 @@ int index_status(const Index *index) {
 int index_load(Index *index) {
     // TODO: Implement index loading
     // (See Lab Appendix for logical steps)
-    (void)index;
-    return -1;
+    index->count = 0;
+
+    FILE *f = fopen(INDEX_FILE, "r");
+    if (!f) {
+        if (errno == ENOENT) return 0;
+        return -1;
+    }
+    char hex[HASH_HEX_SIZE + 1];
+    while (index->count < MAX_INDEX_ENTRIES) {
+        IndexEntry *e = &index->entries[index->count];
+        int rc = fscanf(f, "%o %64s %llu %u %511s\n",
+                        &e->mode, hex,
+                        (unsigned long long *)&e->mtime_sec,
+                        &e->size, e->path);
+        if (rc == EOF || rc != 5) break;
+        if (hex_to_hash(hex, &e->hash) != 0) { fclose(f); return -1; }
+        index->count++;
+    }
+    return 0;
 }
 
 // Save the index to .pes/index atomically.
@@ -154,8 +172,35 @@ int index_load(Index *index) {
 int index_save(const Index *index) {
     // TODO: Implement atomic index saving
     // (See Lab Appendix for logical steps)
-    (void)index;
-    return -1;
+    // Sort a copy of the entries by path
+    Index sorted = *index;
+    int cmp_entries(const void *a, const void *b) {
+        return strcmp(((const IndexEntry *)a)->path, ((const IndexEntry *)b)->path);
+    }
+    qsort(sorted.entries, sorted.count, sizeof(IndexEntry), cmp_entries);
+
+    char tmp_path[256];
+    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", INDEX_FILE);
+
+    FILE *f = fopen(tmp_path, "w");
+    if (!f) return -1;
+
+    for (int i = 0; i < sorted.count; i++) {
+        char hex[HASH_HEX_SIZE + 1];
+        hash_to_hex(&sorted.entries[i].hash, hex);
+        fprintf(f, "%o %s %llu %u %s\n",
+                sorted.entries[i].mode,
+                hex,
+                (unsigned long long)sorted.entries[i].mtime_sec,
+                sorted.entries[i].size,
+                sorted.entries[i].path);
+    }
+
+    fflush(f);
+    fsync(fileno(f));
+    fclose(f);
+
+    return rename(tmp_path, INDEX_FILE);
 }
 
 // Stage a file for the next commit.
@@ -170,6 +215,47 @@ int index_save(const Index *index) {
 int index_add(Index *index, const char *path) {
     // TODO: Implement file staging
     // (See Lab Appendix for logical steps)
-    (void)index; (void)path;
-    return -1;
+    // Read the file contents
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        fprintf(stderr, "error: cannot open '%s'\n", path);
+        return -1;
+    }
+    fseek(f, 0, SEEK_END);
+    long file_size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (file_size < 0) { fclose(f); return -1; }
+
+    void *contents = malloc((size_t)file_size);
+    if (!contents) { fclose(f); return -1; }
+    size_t nread = fread(contents, 1, (size_t)file_size, f);
+    fclose(f);
+    if (nread != (size_t)file_size) { free(contents); return -1; }
+
+    // Write blob to object store
+    ObjectID blob_id;
+    if (object_write(OBJ_BLOB, contents, (size_t)file_size, &blob_id) != 0) {
+        free(contents); return -1;
+    }
+    free(contents);
+
+    // Get file metadata
+    struct stat st;
+    if (stat(path, &st) != 0) return -1;
+
+    // Find or create index entry
+    IndexEntry *entry = index_find(index, path);
+    if (!entry) {
+        if (index->count >= MAX_INDEX_ENTRIES) return -1;
+        entry = &index->entries[index->count++];
+        snprintf(entry->path, sizeof(entry->path), "%s", path);
+    }
+
+    entry->hash = blob_id;
+    entry->mtime_sec = (uint64_t)st.st_mtime;
+    entry->size = (uint32_t)st.st_size;
+    // Determine mode
+    entry->mode = (st.st_mode & S_IXUSR) ? 0100755 : 0100644;
+
+    return index_save(index);
 }
