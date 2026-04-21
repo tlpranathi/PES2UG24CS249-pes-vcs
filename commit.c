@@ -193,27 +193,49 @@ int head_update(const ObjectID *new_commit) {
 //   - head_update       : moves the branch pointer to your new commit
 //
 // Returns 0 on success, -1 on error.
+
 int commit_create(const char *message, ObjectID *commit_id_out) {
-    // TODO: Implement commit creation
-    // (See Lab Appendix for logical steps)
-   Commit c;
-   memset(&c, 0, sizeof(c));
-   if (tree_from_index(&c.tree) != 0) return -1;
-    if (head_read(&c.parent) == 0) {
-    c.has_parent = 1;
-} else {
-    c.has_parent = 0;
-}
-snprintf(c.author, sizeof(c.author), "%s", pes_author());
-c.timestamp = (uint64_t)time(NULL);
-snprintf(c.message, sizeof(c.message), "%s", message);
-void *data;
-size_t len;
-if (commit_serialize(&c, &data, &len) != 0) return -1;
+    // Step 1: build tree from index
+    ObjectID tree_id;
+    if (tree_from_index(&tree_id) != 0) return -1;
 
-int rc = object_write(OBJ_COMMIT, data, len, commit_id_out);
-free(data);
-if (rc != 0) return -1;
+    // Step 2: prepare commit struct
+    Commit commit;
+    memset(&commit, 0, sizeof(commit));
 
-return head_update(commit_id_out);
+    commit.tree = tree_id;
+
+    // Step 3: get parent (if exists)
+    ObjectID parent_id;
+    if (head_read(&parent_id) == 0) {
+        commit.parent = parent_id;
+        commit.has_parent = 1;
+    } else {
+        commit.has_parent = 0;
+    }
+
+    // Step 4: author + timestamp
+    snprintf(commit.author, sizeof(commit.author), "%s", pes_author());
+    commit.timestamp = (uint64_t)time(NULL);
+
+    // Step 5: message
+    snprintf(commit.message, sizeof(commit.message), "%s", message);
+
+    // Step 6: serialize
+    void *data;
+    size_t len;
+    if (commit_serialize(&commit, &data, &len) != 0) return -1;
+
+    // Step 7: write commit object
+    if (object_write(OBJ_COMMIT, data, len, commit_id_out) != 0) {
+        free(data);
+        return -1;
+    }
+
+    free(data);
+
+    // Step 8: update HEAD
+    if (head_update(commit_id_out) != 0) return -1;
+
+    return 0;
 }
