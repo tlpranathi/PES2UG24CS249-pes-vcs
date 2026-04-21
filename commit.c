@@ -196,6 +196,24 @@ int head_update(const ObjectID *new_commit) {
 int commit_create(const char *message, ObjectID *commit_id_out) {
     // TODO: Implement commit creation
     // (See Lab Appendix for logical steps)
-    (void)message; (void)commit_id_out;
-    return -1;
+   Commit c;
+   memset(&c, 0, sizeof(c));
+   if (tree_from_index(&c.tree) != 0) return -1;
+    if (head_read(&c.parent) == 0) {
+    c.has_parent = 1;
+} else {
+    c.has_parent = 0;
+}
+snprintf(c.author, sizeof(c.author), "%s", pes_author());
+c.timestamp = (uint64_t)time(NULL);
+snprintf(c.message, sizeof(c.message), "%s", message);
+void *data;
+size_t len;
+if (commit_serialize(&c, &data, &len) != 0) return -1;
+
+int rc = object_write(OBJ_COMMIT, data, len, commit_id_out);
+free(data);
+if (rc != 0) return -1;
+
+return head_update(commit_id_out);
 }
